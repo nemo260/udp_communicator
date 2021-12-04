@@ -71,8 +71,32 @@ def create_packet(type, data, id, total_packets):
 
         return packet
 
+    # vytvorenie packetu pre pozitivne ARQ
+    if type == 4:
+        packetID = 1
+        total_packets = 1
+        packet = type.to_bytes(1, byteorder='big') + packetID.to_bytes(3, byteorder='big') + total_packets.to_bytes(3,
+                                                                                                                    byteorder='big')
+        crc = zlib.crc32(packet)
+        crc = crc.to_bytes(4, byteorder='big')
+        packet = packet + crc
+        return packet
+
+    # vytvorenie packetu pre pozitivne ARQ
+    if type == 5:
+        packetID = 1
+        total_packets = 1
+        packet = type.to_bytes(1, byteorder='big') + packetID.to_bytes(3, byteorder='big') + total_packets.to_bytes(
+            3,
+            byteorder='big')
+        crc = zlib.crc32(packet)
+        crc = crc.to_bytes(4, byteorder='big')
+        packet = packet + crc
+        return packet
+
 
 def send_packets(sock, mof):
+    global neposkodeny
     pkt_array = []
     if mof == 1:
         msg = input("Napíš správu:\n")
@@ -118,7 +142,6 @@ def send_packets(sock, mof):
 
             start = 0
             end = fragment_size
-            k = 1
             for i in range(1, fragments_num + 1):
                 data_frame = data[start:end]
                 packet = create_packet(3, data_frame, i, fragments_num)
@@ -127,10 +150,20 @@ def send_packets(sock, mof):
                 end += fragment_size
 
             for i in range(len(pkt_array)):
-                if i == 8 * k:
-                    time.sleep(0.1)
-                    k += 1
+                """
+                if i == 2:
+                    neposkodeny = pkt_array[i]
+                    bad = list(pkt_array[i])
+                    bad[17:19] = bad[22:24]
+                    pkt_array[i] = bad
+                """
                 sock.sendto(pkt_array[i], (ip, udp_port))
+                pckt, addr = sock.recvfrom(1500)    # čaka na spätnu väzbu od servera
+                type1, packetID1, total_packets1, crc1, data1 = decode_packet(pckt)
+                if type1 == 4:
+                    print(str(i) + ". packet OK")
+                if type1 == 5:
+                    sock.sendto(neposkodeny, (ip, udp_port))
 
         if yn == 0:
             packet = create_packet(3, os.path.basename(f.name), 0, 2)
@@ -179,6 +212,15 @@ def client_mode():
     client(sock)
 
 
+def crc_is_good(pckt, crc):
+    pkt_no_crc = pckt[0:7] + pckt[11:]
+    crc_new = zlib.crc32(pkt_no_crc)
+    if crc_new == crc:
+        return True
+    else:
+        return False
+
+
 def server_mode():
     global f
     cesta = ""
@@ -187,6 +229,8 @@ def server_mode():
     print("Toto zariadenie je používané ako SERVER\n")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(30)
+
+    # nadviazanie komunikacie
     try:
         sock.bind((my_ip, udp_port))
         pckt, addr = sock.recvfrom(1500)
@@ -200,9 +244,20 @@ def server_mode():
         sock.close()
         print("Vyprsal cas")
 
+    # cyklus pre prijmanie packetov
     while True:
         pckt, addr = sock.recvfrom(1500)
         type, packetID, total_packets, crc, data = decode_packet(pckt)
+
+        if crc_is_good(pckt, crc):
+            print("Packet " + str(packetID) + ": OK")
+            packet = create_packet(4, "", 0, 1)  # odoslanie spravy že packet došiel OK
+            sock.sendto(packet, (addr[0], udp_port))
+        else:
+            print("Packet " + str(packetID) + ": ZLY PACKET")
+            packet = create_packet(5, "", 0, 1)  # odoslanie spravy že došiel zly packet
+            sock.sendto(packet, (addr[0], udp_port))
+
         if type == 2:
             print("Prijata sprava od " + str(addr[0]) + ": " + data)
         if type == 3:
@@ -222,6 +277,7 @@ def server_mode():
                         f.write(pkt_arr[i])
                     f.close()
                     print("Súbor bol prijatý. Cesta k súboru: " + os.path.abspath(cesta))
+
 
 def starting():
     option = int(input("Client mode - 1\nServer mode - 2\nExit - 0\n"))
