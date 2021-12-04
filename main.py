@@ -6,6 +6,9 @@ import zlib
 import os
 import math
 
+keep_alive = False
+stop_thread = False
+
 
 def decode_packet(pkt):
     type = int.from_bytes(pkt[0:1], 'big')
@@ -150,9 +153,23 @@ def create_packet(type, data, id, total_packets):
         packet = packet + crc
         return packet
 
+    # vytvorenie keep alive packetu
+    if type == 8:
+        packetID = 1
+        total_packets = 1
+        packet = type.to_bytes(1, byteorder='big') + packetID.to_bytes(3, byteorder='big') + total_packets.to_bytes(
+            3,
+            byteorder='big')
+        crc = zlib.crc32(packet)
+        crc = crc.to_bytes(4, byteorder='big')
+        packet = packet + crc
+        return packet
+
 
 def send_packets(sock, mof):
     global neposkodeny
+    global keep_alive
+    keep_alive = False
     simulation = False
     packet_lost = False
     pkt_array = []
@@ -162,10 +179,14 @@ def send_packets(sock, mof):
         sock.sendto(packet, (ip, udp_port))
 
     if mof == 2:
-        # path = input("Zadaj cestu k súboru: ")
-        path = "D:/skola/3.sem/pks/2zadanie/Usability testing evaluation.pptx"
+        path = input("Zadaj cestu k súboru: ")
+        #path = "D:/skola/3.sem/pks/2zadanie/crc.jpg"
         f = open(path, "rb")
         data = f.read()
+
+        save_file = input(
+            "Zadaj absolutnu cestu k suboru kde ma byť uložený (Ak nechceš stlač 0 a uloží to tam kde je program): ")
+
         yn = int(input("Tvoj súbor má " + str(len(data)) + " bajtov, chceš ho deliť na fragmenty?\nANO - 1\nNIE - 0\n"))
         if yn == 0 and len(data) > 1461:
             print("Tvoj súbor má " + str(len(data)) + " bajtov, je potrebne ho rozdeliť na fragmenty!")
@@ -187,7 +208,11 @@ def send_packets(sock, mof):
             fragments_num = math.ceil(data_size / fragment_size)
 
             # vytvori 0-ty packet s nazvom suboru a prida do pola
-            packet = create_packet(3, os.path.basename(f.name), 0, fragments_num)
+            if save_file == "0":
+                packet = create_packet(3, "D:/skola/pks 2 zadanie/pks2_zadanie/" + os.path.basename(path), 0,
+                                       fragments_num)
+            else:
+                packet = create_packet(3, save_file + os.path.basename(path), 0, fragments_num)
             pkt_array.append(packet)
 
             start = 0
@@ -197,7 +222,8 @@ def send_packets(sock, mof):
             for i in range(1, fragments_num + 1):
                 if simulation:  # simuluje prvy packet chybny
                     data_frame = data[start:end]
-                    packet, good_crc = create_bad_packet(3, data_frame, i, fragments_num, 0, 0)  # vytvori dobry packet aj s crc
+                    packet, good_crc = create_bad_packet(3, data_frame, i, fragments_num, 0,
+                                                         0)  # vytvori dobry packet aj s crc
                     good_pkt_arr.append(packet)
 
                     data_frame = b"smola"
@@ -232,10 +258,10 @@ def send_packets(sock, mof):
                         if type1 == 5:
                             print(str(i) + ". znovu chybny")
 
-                    #packet_lost = False
+                    # packet_lost = False
                 else:
                     sock.sendto(pkt_array[i], (ip, udp_port))
-                    pckt, addr = sock.recvfrom(1500)    # čaka na spätnu väzbu od servera
+                    pckt, addr = sock.recvfrom(1500)  # čaka na spätnu väzbu od servera
                     type1, packetID1, total_packets1, crc1, data1 = decode_packet(pckt)
                     if type1 == 4:
                         print(str(i) + ". packet OK")
@@ -266,10 +292,26 @@ def send_packets(sock, mof):
         f.close()
 
 
+def keep_alive_function(sock, ip):
+    while True:
+        if stop_thread:
+            break
+        if keep_alive:
+            time.sleep(5)
+            packet = create_packet(8, "", 0, 1)
+            sock.sendto(packet, (ip, udp_port))
+
+
 def client(sock):
+    global keep_alive
+    global stop_thread
+    keep_alive = True
     message_or_file = int(input("Poslať správu - 1\nPoslať subor - 2\nMenu - 0\n"))
     if message_or_file == 0:
+        keep_alive = False
+        stop_thread = True
         starting("client", sock, ip)
+
     else:
         send_packets(sock, message_or_file)
         client(sock)
@@ -279,6 +321,9 @@ def client_mode():
     print("Toto zariadenie je používané ako CLIENT\n")
     global ip
     global udp_port
+    global keep_alive
+    global stop_thread
+    stop_thread = False
     ip = input("Zadaj IP kam chceš posielať súbory: ")
     udp_port = int(input("Zadaj port: "))
 
@@ -296,10 +341,13 @@ def client_mode():
 
         if type == 1:
             print("Nadviazane spojenie s " + str(addr[0]))
+
     except:
         sock.close()
         print("Vyprsal cas")
 
+    t1 = threading.Thread(target=keep_alive_function, args=(sock, ip))
+    t1.start()
     client(sock)
 
 
@@ -317,63 +365,77 @@ def catch_packets(sock, ip):
     pkt_arr = []
     cesta = ""
     timer = False
-    # cyklus pre prijmanie packetov
-    while True:
+    sock.settimeout(30)
+    try:
+        # cyklus pre prijmanie packetov
+        while True:
 
-        if timer:
-            sock.settimeout(10)
-        try:
-            pckt, addr = sock.recvfrom(1500)
-            type, packetID, total_packets, crc, data = decode_packet(pckt)
-            if packetID == 0:
-                timer = True
+            if timer:
+                sock.settimeout(10)
+            try:
+                pckt, addr = sock.recvfrom(1500)
+                type, packetID, total_packets, crc, data = decode_packet(pckt)
+                if packetID == 0:
+                    timer = True
 
-            if type == 7:
-                sock.close()
-                client_mode()
+                if type == 7:
+                    sock.close()
+                    client_mode()
 
-            if crc_is_good(pckt, crc):
-                print("Packet " + str(packetID) + ": OK")
-                packet = create_packet(4, "", 0, 1)  # odoslanie spravy že packet došiel OK
-                sock.sendto(packet, (addr[0], udp_port))
-
-                # pokracovanie zistovania pcketov
-                if type == 2:
-                    print("Prijata sprava od " + str(addr[0]) + ": " + data)
+                if type == 8:
+                    print("Keep alive pkt")
                     timer = False
                     catch_packets(sock, ip)
-                if type == 3:
-                    if packetID == 0:
-                        pkt_arr = []
-                        f = open(data, "wb")
-                        cesta = data.decode('utf-8')
 
-                        f.close()
-                    else:
-                        counter += 1
-                        pkt_arr.append(data)
+                if crc_is_good(pckt, crc):
+                    print("Packet " + str(packetID) + ": OK")
+                    packet = create_packet(4, "", 0, 1)  # odoslanie spravy že packet došiel OK
+                    sock.sendto(packet, (addr[0], udp_port))
 
-                        if counter == total_packets:
-                            f = open(cesta, "wb")
-                            for i in range(total_packets):
-                                f.write(pkt_arr[i])
+                    # pokracovanie zistovania pcketov
+                    if type == 2:
+                        print("Prijata sprava od " + str(addr[0]) + ": " + data)
+                        timer = False
+                        catch_packets(sock, ip)
+                    if type == 3:
+                        if packetID == 0:
+                            pkt_arr = []
+                            f = open(data, "wb")
+                            cesta = data.decode('utf-8')
+
                             f.close()
-                            print("Súbor " + os.path.basename(cesta) + " prijatý. Cesta k súboru: " + os.path.abspath(cesta))
-                            print("Prijatých " + str(total_packets) + " fragmentov. Velkosť súboru v bajtoch: " + str(os.path.getsize(cesta)))
-                            print()
-                            timer = False
-                            catch_packets(sock, ip)
+                        else:
+                            counter += 1
+                            pkt_arr.append(data)
 
-            else:
-                print("Packet " + str(packetID) + ": ZLY PACKET")
-                packet = create_packet(5, "", 0, 1)  # odoslanie spravy že došiel zly packet
-                sock.sendto(packet, (addr[0], udp_port))
-        except:
-            if timer:
-                print("Packet " + str(counter+1) + ": LOST")
-                packet = create_packet(6, "", 0, 1)  # odoslanie spravy že nedošiel packet
-                sock.sendto(packet, (ip, udp_port))
-                #catch_packets(sock, ip)
+                            if counter == total_packets:
+                                f = open(cesta, "wb")
+                                for i in range(total_packets):
+                                    f.write(pkt_arr[i])
+                                f.close()
+                                print("Súbor " + os.path.basename(cesta) + " prijatý. Cesta k súboru: " + os.path.abspath(
+                                    cesta))
+                                print("Prijatých " + str(total_packets) + " fragmentov. Velkosť súboru v bajtoch: " + str(
+                                    os.path.getsize(cesta)))
+                                print()
+                                timer = False
+                                catch_packets(sock, ip)
+
+
+                else:
+                    print("Packet " + str(packetID) + ": ZLY PACKET")
+                    packet = create_packet(5, "", 0, 1)  # odoslanie spravy že došiel zly packet
+                    sock.sendto(packet, (addr[0], udp_port))
+            except:
+                if timer:
+                    print("Packet " + str(counter + 1) + ": LOST")
+                    packet = create_packet(6, "", 0, 1)  # odoslanie spravy že nedošiel packet
+                    sock.sendto(packet, (ip, udp_port))
+                    # catch_packets(sock, ip)
+    except:
+        print("Neprebieha komunikacia ani keep alive.")
+        print("Program sa vypne...")
+        exit()
 
 
 def server_mode(communication, sock):
