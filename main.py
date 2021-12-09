@@ -1,10 +1,9 @@
-import random
+import math
+import os
 import socket
 import threading
 import time
 import zlib
-import os
-import math
 
 keep_alive = False
 stop_thread = False
@@ -80,7 +79,7 @@ def create_packet(type, data, id, total_packets):
 
     # vytvorenie packetu pre správu
     if type == 2:
-        packetID = 0
+        packetID = id
         packet = type.to_bytes(1, byteorder='big') + packetID.to_bytes(3, byteorder='big') + total_packets.to_bytes(3,
                                                                                                                     byteorder='big')
         data = data.encode('utf-8')
@@ -173,10 +172,105 @@ def send_packets(sock, mof):
     simulation = False
     packet_lost = False
     pkt_array = []
+
     if mof == 1:
-        msg = input("Napíš správu:\n")
-        packet = create_packet(2, msg, 0, 1)
-        sock.sendto(packet, (ip, udp_port))
+        data = input("Napíš správu:\n")
+        #packet = create_packet(2, data, 0, 1)
+
+        yn = int(input("Tvoja sprava má " + str(len(data)) + " bajtov, chceš ju deliť na fragmenty?\nANO - 1\nNIE - 0\n"))
+
+        if yn == 1:
+            fragment_size = int(input("Zadaj velkost jedneho fragmentu v bajtoch (max. 1461)\n"))
+            wrong_packet = int(input("Chceš simulovať chybu?\nPošle chybný packet - 1\nPacket neodošle - 2\nNechcem "
+                                     "simulovať chybu - 0\n"))
+
+            if wrong_packet == 0:
+                pass
+            if wrong_packet == 1:
+                simulation = True
+            if wrong_packet == 2:
+                packet_lost = True
+
+            data_size = len(data)
+            fragments_num = math.ceil(data_size / fragment_size)
+
+            # vytvori 0-ty packet s nazvom suboru a prida do pola
+            packet = create_packet(2, "Message: ", 0, fragments_num)
+            pkt_array.append(packet)
+
+            start = 0
+            end = fragment_size
+            good_pkt_arr = []
+            # vytvaranie packetov
+            for i in range(1, fragments_num + 1):
+                if simulation:  # simuluje prvy packet chybny
+                    data_frame = data[start:end]
+                    packet, good_crc = create_bad_packet(2, data_frame, i, fragments_num, 0,
+                                                         0)  # vytvori dobry packet aj s crc
+                    good_pkt_arr.append(packet)
+
+                    data_frame = "smola"
+                    packet = create_bad_packet(2, data_frame, i, fragments_num, 1, good_crc)
+
+                    pkt_array.append(packet)
+                    start += fragment_size
+                    end += fragment_size
+
+                    simulation = False  # vypnutie simulacie pre chybne packety
+
+                else:
+                    data_frame = data[start:end]
+                    packet = create_packet(2, data_frame, i, fragments_num)
+                    pkt_array.append(packet)
+                    start += fragment_size
+                    end += fragment_size
+
+            # posielanie packetov
+            #sock.sendto(pkt_array[0], (ip, udp_port))
+            #pkt_array.remove(pkt_array[0])
+            for i in range(len(pkt_array)):
+                if packet_lost and i != 0 and i == 5:
+
+                    pckt, addr = sock.recvfrom(1500)  # čaka na spätnu väzbu od servera
+                    type1, packetID1, total_packets1, crc1, data1 = decode_packet(pckt)
+                    if type1 == 6:  # type = 6 - neprišiel packet na server
+                        sock.sendto(pkt_array[i], (ip, udp_port))
+                        pckt, addr = sock.recvfrom(1500)
+                        type1, packetID1, total_packets1, crc1, data1 = decode_packet(pckt)
+                        if type1 == 4:
+                            print(str(i) + ". packet OK")
+                        if type1 == 5:
+                            print(str(i) + ". znovu chybny")
+
+                    #packet_lost = False
+                else:
+                    sock.sendto(pkt_array[i], (ip, udp_port))
+                    pckt, addr = sock.recvfrom(1500)  # čaka na spätnu väzbu od servera
+                    type1, packetID1, total_packets1, crc1, data1 = decode_packet(pckt)
+                    if type1 == 4:
+                        print(str(i) + ". packet OK")
+                    if type1 == 5:
+                        sock.sendto(good_pkt_arr[0], (ip, udp_port))
+                        del good_pkt_arr[0]
+                        pckt, addr = sock.recvfrom(1500)  # čaka na spätnu väzbu od servera
+                        type1, packetID1, total_packets1, crc1, data1 = decode_packet(pckt)
+                        if type1 == 4:
+                            print(str(i) + ". packet OK")
+                        if type1 == 5:
+                            print(str(i) + ". znovu chybny")
+                    #packet_lost = True
+            print("Odoslalo sa " + str(fragments_num) + " fragmentov")
+            print()
+
+        if yn == 0:
+            packet = create_packet(2, "Message: ", 0, 2)
+            pkt_array.append(packet)
+
+            packet = create_packet(2, data, 1, 2)
+            pkt_array.append(packet)
+
+            for i in range(len(pkt_array)):
+                sock.sendto(pkt_array[i], (ip, udp_port))
 
     if mof == 2:
         path = input("Zadaj cestu k súboru: ")
@@ -371,7 +465,7 @@ def catch_packets(sock, ip):
         while True:
 
             if timer:
-                sock.settimeout(10)
+                sock.settimeout(3)
             try:
                 pckt, addr = sock.recvfrom(1500)
                 type, packetID, total_packets, crc, data = decode_packet(pckt)
@@ -391,12 +485,22 @@ def catch_packets(sock, ip):
                     print("Packet " + str(packetID) + ": OK")
                     packet = create_packet(4, "", 0, 1)  # odoslanie spravy že packet došiel OK
                     sock.sendto(packet, (addr[0], udp_port))
-
                     # pokracovanie zistovania pcketov
                     if type == 2:
-                        print("Prijata sprava od " + str(addr[0]) + ": " + data)
-                        timer = False
-                        catch_packets(sock, ip)
+                        if packetID == 0:
+                            pkt_arr = []
+                            pass
+                        else:
+                            counter += 1
+                            pkt_arr.append(data)
+
+                            if counter == total_packets:
+                                print("Prijata sprava: ", end="")
+                                for i in pkt_arr:
+                                    print(i, end="")
+                                print()
+                                timer = False
+                                catch_packets(sock, ip)
                     if type == 3:
                         if packetID == 0:
                             pkt_arr = []
@@ -420,6 +524,7 @@ def catch_packets(sock, ip):
                                 print()
                                 timer = False
                                 catch_packets(sock, ip)
+
 
 
                 else:
